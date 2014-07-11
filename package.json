@@ -1,0 +1,25 @@
+{
+  "name": "dockstash",
+  "version": "0.0.1",
+  "description": "A log management tool for Docker and Logstash",
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "scripts": {
+    "test": "mocha"
+  },
+  "keywords": [
+    "docker",
+    "logstash",
+    "logging",
+    "logs"
+  ],
+  "author": "Mike Holly <mikejholly@gmail.com>",
+  "license": "ISC",
+  "dependencies": {
+    "yargs": "^1.2.6",
+    "glob": "^4.0.3",
+    "async": "^0.9.0"
+  }
+}
