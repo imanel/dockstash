@@ -21,11 +21,6 @@ function getLogFiles(pattern, fn) {
   glob(pattern, fn);
 }
 
-function createLogstashConn(fn) {
-  var parts = argv.host.split(':');
-  return net.connect({host: parts[0], port: parts[1]}, fn);
-}
-
 function run() {
   getLogFiles(argv.glob, function(err, files) {
 
