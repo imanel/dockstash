@@ -8,10 +8,10 @@ var async  = require('async');
 var Parser = require('./lib/parser');
 
 var argv = require('yargs')
-  .default('glob', '/var/lib/docker/containers/*/*-json.log')
+  .default('dir', '/var/lib/docker/containers')
   .default('host', 'localhost')
   .default('port', '3000')
-  .default('interval', 1000 * 10)
+  .default('interval', 10)
   .argv;
 
 if (argv.help || argv.h) {
@@ -23,7 +23,7 @@ function getLogFiles(pattern, fn) {
 }
 
 function run() {
-  getLogFiles(argv.glob, function(err, files) {
+  getLogFiles(argv.containersDir, function(err, files) {
     files.forEach(function(file) {
       fs.stat(file, function(err, stats) {
         if (stats.size > 0) {
@@ -43,11 +43,11 @@ function run() {
   });
 }
 
-setInterval(run, argv.interval);
+setInterval(run, parseInt(argv.interval, 10) * 1000);
 run();
 
 function help() {
   console.log('Streams Docker logs to Logstash. Wakes up every --sleep seconds to process Docker logs.');
-  console.log('  Usage: ' + argv.$0 + ' --files <log-file-glob> --logstash <logstash-server:port>');
+  console.log('  Usage: ' + argv.$0 + ' --host <logstash-host> --port <logstash-port>');
   process.exit();
 };
