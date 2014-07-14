@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 'use strict';
 
 var fs     = require('fs');
@@ -10,7 +11,7 @@ var argv = require('yargs')
   .default('glob', '/var/lib/docker/containers/*/*-json.log')
   .default('host', 'localhost')
   .default('port', '3000')
-  .default('interval', 1000 * 30)
+  .default('interval', 1000 * 10)
   .argv;
 
 if (argv.help || argv.h) {
@@ -23,25 +24,22 @@ function getLogFiles(pattern, fn) {
 
 function run() {
   getLogFiles(argv.glob, function(err, files) {
-
     files.forEach(function(file) {
+      fs.stat(file, function(err, stats) {
+        if (stats.size > 0) {
+          var rolledStream = fs.createWriteStream(file + '.rolled');
+          var sourceStream = fs.createReadStream(file);
+          var logstashConn = net.connect(argv.port, argv.host);
 
-      console.log(file);
+          sourceStream.pipe(rolledStream);
+          sourceStream.pipe(new Parser(tags)).pipe(logstashConn);
 
-      var rolledStream = fs.createWriteStream(file + '.rolled');
-      var sourceStream = fs.createReadStream(file);
-      var logstashConn = net.connect(argv.port, argv.host);
-
-      sourceStream.pipe(rolledStream);
-      sourceStream.pipe(new Parser()).pipe(logstashConn);
-
-      sourceStream.on('end', function() {
-        console.log('done reading');
-        // fs.truncate(file, 0);
-      });
-
+          sourceStream.on('end', function() {
+            fs.truncate(file, 0);
+          });
+        }
+      })
     });
-
   });
 }
 
