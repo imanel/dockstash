@@ -1,53 +1,214 @@
 #!/usr/bin/env node
 'use strict';
 
-var fs     = require('fs');
-var net    = require('net');
-var glob   = require('glob');
-var async  = require('async');
-var Parser = require('./lib/parser');
+var net               = require('net');
+var http              = require('http');
+var url               = require('url');
+var _                 = require('lodash');
+var qs                = require('qs');
+var async             = require('async');
+var bytes             = require('bytes');
+var request           = require('request');
+var LogstashTransform = require('../lib/logstash_transform');
+
+http.globalAgent.maxSockets = Infinity;
+
+function help() {
+  console.log('Streams Docker logs to Logstash. Tails Docker logs from remote Docker hosts.');
+  console.log('  Usage: ' + argv.$0 + ' --logstash <host:port>');
+  process.exit();
+};
 
 var argv = require('yargs')
-  .default('dir', '/var/lib/docker/containers')
-  .default('host', 'localhost')
-  .default('port', '3000')
-  .default('interval', 10)
+  .default('logstash', 'localhost')
   .argv;
 
 if (argv.help || argv.h) {
   help();
 }
 
-function getLogFiles(pattern, fn) {
-  glob(pattern, fn);
+function parseHosts(string) {
+  return string
+    .replace(/^\s+|\s+$/, '')
+    .split(/,|\s+/g);
 }
 
-function run() {
-  getLogFiles(argv.containersDir, function(err, files) {
-    files.forEach(function(file) {
-      fs.stat(file, function(err, stats) {
-        if (stats.size > 0) {
-          var rolledStream = fs.createWriteStream(file + '.rolled');
-          var sourceStream = fs.createReadStream(file);
-          var logstashConn = net.connect(argv.port, argv.host);
+function getHosts(fn) {
+  if (argv.hosts) {
+    fn(null, parseHosts(argv.hosts));
+  }
+  else {
+    var stdin = process.stdin;
+    var hosts = '';
+    stdin.setEncoding('utf-8');
+    stdin.on('readable', function() {
+      var chunk;
+      while ((chunk = this.read()) !== null) {
+        hosts += chunk;
+      }
+    });
+    stdin.on('end', function() {
+      fn(null, parseHosts(hosts));
+    });
+  }
+}
 
-          sourceStream.pipe(rolledStream);
-          sourceStream.pipe(new Parser(tags)).pipe(logstashConn);
+function getContainers(host, fn) {
+  var url = 'http://' + host + ':2375/containers/json';
+  request({
+    url: url,
+    json: true,
+  }, function(err, res) {
+    fn(err, res.body);
+  });
+}
 
-          sourceStream.on('end', function() {
-            fs.truncate(file, 0);
-          });
-        }
-      })
+function topContainer(host, containerId, fn) {
+  var query = {
+    ps_args: 'aux',
+  };
+  var url = 'http://' + host + ':2375/containers/' + containerId + '/top?' + qs.stringify(query);
+  request({
+    url: url,
+    json: true,
+  }, function(err, res) {
+    fn(err, res.body);
+  });
+}
+
+function getLogStream(host, containerId) {
+  var query = {
+    follow: 1,
+    tail: 0,
+    stdout: 1,
+    timestamps: 1,
+    stderr: 1,
+  };
+  var url = 'http://' + host + ':2375/containers/' + containerId + '/logs?' + qs.stringify(query);
+  return request({url: url, json: true});
+}
+
+function getLogStreams(fn) {
+  var streams = [];
+  getAllContainers(function(err, results) {
+    async.each(Object.keys(results), function(host, fn) {
+      async.each(results[host], function(container, fn) {
+        var stream = getLogStream(host, container.Id);
+        var nameTag = container.Image.split('/')[1];
+        var parts = nameTag.split(':');
+        streams.push({
+          host: host,
+          name: _.first(container.Names).replace(/^\//, ''),
+          image: container.Image,
+          app: parts[0],
+          tag: parts[1],
+          status: container.Status,
+          containerId: container.Id,
+          created: container.Created,
+          stream: stream,
+        });
+        fn();
+      }, fn);
+    }, function(err, results) {
+      fn(err, streams);
     });
   });
 }
 
-setInterval(run, parseInt(argv.interval, 10) * 1000);
-run();
+function handleStreamEnd(stream) {
+  console.log(arguments);
+}
 
-function help() {
-  console.log('Streams Docker logs to Logstash. Wakes up every --sleep seconds to process Docker logs.');
-  console.log('  Usage: ' + argv.$0 + ' --host <logstash-host> --port <logstash-port>');
-  process.exit();
+function handleStreamError(stream, error) {
+  console.log(arguments);
+}
+
+function startLogstashStream(stream) {
+  var parts = url.parse('http://' + argv.logstash);
+  var logstashConn = net.connect(parts.port, parts.hostname);
+  var tags = _.clone(stream);
+  delete tags.stream;
+  var s = stream.stream;
+  s.pipe(new LogstashTransform(tags)).pipe(logstashConn);
+  s.on('end', _.partial(handleStreamEnd, s));
+  s.on('error', _.partial(handleStreamError, s));
+  logstashConn.on('error', function() {
+    console.log(arguments)
+  });
+}
+
+function initLogStreaming() {
+  getLogStreams(function(err, streams) {
+    _.each(streams, startLogstashStream);
+  });
+}
+
+function getTopMessage(status) {
+  return [
+    '%cpu: ' + status['%CPU'],
+    '%mem: ' + status['%MEM'],
+    'rss: ' + bytes(parseInt(status.RSS, 10)),
+    'vsz: ' + bytes(parseInt(status.VSZ, 10)),
+  ].join(', ');
+}
+
+function prepareTopHash(host, container, status) {
+  status.host = host;
+  status.containerId = container.Id;
+  status.datetime = Math.round(new Date().getTime() / 1000);
+  status['@message'] = getTopMessage(status);
+  status.type = 'top';
+  status.uptime = container.Status;
+  var nameTag = container.Image.split('/')[1];
+  var parts = nameTag.split(':');
+  status.app = parts[0];
+  status.tag = parts[1];
+}
+
+function sendTopToLogstash(host, container, top, fn) {
+  var _parts = url.parse('http://' + argv.logstash);
+  var conn = net.connect(_parts.port, _parts.hostname, function() {
+    _.map(top.Processes, function(item) {
+      var status = _.object(top.Titles, item);
+      prepareTopHash(host, container, status);
+      conn.write(JSON.stringify(status) + '\n', 'utf-8');
+    });
+    conn.end();
+  });
+  conn.on('finish', fn);
 };
+
+function getAllContainers(fn) {
+  var results = {};
+  getHosts(function(err, hosts) {
+    async.each(hosts, function(host, fn) {
+      getContainers(host, function(err, containers) {
+        results[host] = containers;
+        fn(err);
+      });
+    }, function(err) {
+      fn(err, results);
+    });
+  });
+}
+
+function initChecks() {
+  setInterval(function() {
+    getAllContainers(function(err, results) {
+      _.map(results, function(containers, host) {
+        containers.forEach(function(container) {
+          topContainer(host, container.Id, function(err, top) {
+            sendTopToLogstash(host, container, top, _.noop);
+          });
+        });
+      });
+    });
+  }, 10000);
+}
+
+function main() {
+  //initChecks();
+  initLogStreaming();
+}
+
+main();
