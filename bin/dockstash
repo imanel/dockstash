@@ -88,25 +88,29 @@ function getLogStream(host, containerId) {
   return request({url: url, json: true});
 }
 
+function prepareStreamHash(host, container, stream) {
+  var nameTag = container.Image.split('/')[1];
+  var parts = nameTag.split(':');
+  return {
+    host: host,
+    name: _.first(container.Names).replace(/^\//, ''),
+    image: container.Image,
+    app: parts[0],
+    tag: parts[1],
+    status: container.Status,
+    containerId: container.Id,
+    created: container.Created,
+    stream: stream,
+  };
+}
+
 function getLogStreams(fn) {
   var streams = [];
   getAllContainers(function(err, results) {
     async.each(Object.keys(results), function(host, fn) {
       async.each(results[host], function(container, fn) {
         var stream = getLogStream(host, container.Id);
-        var nameTag = container.Image.split('/')[1];
-        var parts = nameTag.split(':');
-        streams.push({
-          host: host,
-          name: _.first(container.Names).replace(/^\//, ''),
-          image: container.Image,
-          app: parts[0],
-          tag: parts[1],
-          status: container.Status,
-          containerId: container.Id,
-          created: container.Created,
-          stream: stream,
-        });
+        streams.push(prepareStreamHash(host, container, stream));
         fn();
       }, fn);
     }, function(err, results) {
@@ -152,17 +156,21 @@ function getTopMessage(status) {
   ].join(', ');
 }
 
-function prepareTopHash(host, container, status) {
-  status.host = host;
-  status.containerId = container.Id;
-  status.datetime = Math.round(new Date().getTime() / 1000);
-  status['@message'] = getTopMessage(status);
-  status.type = 'top';
-  status.uptime = container.Status;
+function prepareTopHash(host, container, item, titles) {
   var nameTag = container.Image.split('/')[1];
   var parts = nameTag.split(':');
-  status.app = parts[0];
-  status.tag = parts[1];
+  var hash = {
+    host: host,
+    containerId: container.Id,
+    datetime: Math.round(new Date().getTime() / 1000),
+    type: 'top',
+    uptime: container.Status,
+    app: parts[0],
+    tag: parts[1],
+  };
+  hash = _.extend(hash, _.object(titles, item));
+  hash['@message'] = getTopMessage(hash);
+  return hash;
 }
 
 function sendTopToLogstash(host, container, top, fn) {
@@ -170,7 +178,7 @@ function sendTopToLogstash(host, container, top, fn) {
   var conn = net.connect(_parts.port, _parts.hostname, function() {
     _.map(top.Processes, function(item) {
       var status = _.object(top.Titles, item);
-      prepareTopHash(host, container, status);
+      var status = prepareTopHash(host, container, item, top.Titles);
       conn.write(JSON.stringify(status) + '\n', 'utf-8');
     });
     conn.end();
@@ -192,22 +200,25 @@ function getAllContainers(fn) {
   });
 }
 
-function initChecks() {
-  setInterval(function() {
-    getAllContainers(function(err, results) {
-      _.map(results, function(containers, host) {
-        containers.forEach(function(container) {
-          topContainer(host, container.Id, function(err, top) {
-            sendTopToLogstash(host, container, top, _.noop);
-          });
+function topAllContainers() {
+  getAllContainers(function(err, results) {
+    _.map(results, function(containers, host) {
+      containers.forEach(function(container) {
+        topContainer(host, container.Id, function(err, top) {
+          sendTopToLogstash(host, container, top, _.noop);
         });
       });
     });
-  }, 10000);
+  });
+}
+
+function initTops() {
+  setInterval(topAllContainers, 10000);
+  topAllContainers();
 }
 
 function main() {
-  //initChecks();
+  initTops();
   initLogStreaming();
 }
 
