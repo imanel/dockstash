@@ -11,6 +11,10 @@ var bytes             = require('bytes');
 var request           = require('request');
 var LogstashTransform = require('../lib/logstash_transform');
 
+var upContainers = [];
+var Containers = {};
+var Streams = {};
+
 http.globalAgent.maxSockets = Infinity;
 
 function help() {
@@ -88,8 +92,8 @@ function getLogStream(host, containerId) {
   return request({url: url, json: true});
 }
 
-function prepareStreamHash(host, container, stream) {
-  var nameTag = container.Image.split('/')[1];
+function prepareStreamHash(host, container) {
+  var nameTag = container.Image.split('/')[1] || container.Image;
   var parts = nameTag.split(':');
   return {
     host: host,
@@ -100,7 +104,6 @@ function prepareStreamHash(host, container, stream) {
     status: container.Status,
     containerId: container.Id,
     created: container.Created,
-    stream: stream,
   };
 }
 
@@ -120,30 +123,26 @@ function getLogStreams(fn) {
 }
 
 function handleStreamEnd(stream) {
+  console.log('Stream ends');
   console.log(arguments);
 }
 
 function handleStreamError(stream, error) {
+  console.log('Stream errors');
   console.log(arguments);
 }
 
-function startLogstashStream(stream) {
+function startLogstashStream(infos, s) {
+  console.log('start');
   var parts = url.parse('http://' + argv.logstash);
   var logstashConn = net.connect(parts.port, parts.hostname);
-  var tags = _.clone(stream);
-  delete tags.stream;
-  var s = stream.stream;
+  var tags = _.clone(infos);
   s.pipe(new LogstashTransform(tags)).pipe(logstashConn);
   s.on('end', _.partial(handleStreamEnd, s));
   s.on('error', _.partial(handleStreamError, s));
   logstashConn.on('error', function() {
-    console.log(arguments)
-  });
-}
-
-function initLogStreaming() {
-  getLogStreams(function(err, streams) {
-    _.each(streams, startLogstashStream);
+    console.log('Logstash error');
+    console.log(arguments);
   });
 }
 
@@ -157,7 +156,7 @@ function getTopMessage(status) {
 }
 
 function prepareTopHash(host, container, item, titles) {
-  var nameTag = container.Image.split('/')[1];
+  var nameTag = container.Image.split('/')[1] || container.Image;
   var parts = nameTag.split(':');
   var hash = {
     host: host,
@@ -177,7 +176,6 @@ function sendTopToLogstash(host, container, top, fn) {
   var _parts = url.parse('http://' + argv.logstash);
   var conn = net.connect(_parts.port, _parts.hostname, function() {
     _.map(top.Processes, function(item) {
-      var status = _.object(top.Titles, item);
       var status = prepareTopHash(host, container, item, top.Titles);
       conn.write(JSON.stringify(status) + '\n', 'utf-8');
     });
@@ -212,6 +210,46 @@ function topAllContainers() {
   });
 }
 
+
+function refreshContainers(fn) {
+  fn = fn || _.noop;
+  var tmpContainers = [];
+
+  getAllContainers(function(err, results) {
+    async.each(Object.keys(results), function(host, fn) {
+      async.each(results[host], function(container, fn) {
+        var key = host + '-' + container.Id;
+        tmpContainers.push(key);
+        if (!Containers[key]) {
+          Containers[key] = prepareStreamHash(host, container);
+        }
+        fn();
+      }, fn);
+    }, function(err) {
+      var newContainers = _.difference(tmpContainers, upContainers);
+      var oldContainers = _.difference(upContainers, tmpContainers);
+      upContainers = _.union(upContainers, newContainers);
+      console.log('Updated containers');
+      console.log(upContainers);
+      console.log('OLD');
+      console.log(oldContainers);
+
+      // Starts log forward on new conainters
+      async.each(newContainers, function(container, fn) {
+        var parts = container.split('-');
+        var host = parts[0], containerId = parts = [1];
+
+        startLogstashStream(Containers[container], getLogStream(host, containerId));
+
+        fn();
+      }, function(err) {
+        setTimeout(function(){ refreshContainers(); }, 3000);
+        fn();
+      });
+    });
+  });
+}
+
 function initTops() {
   setInterval(topAllContainers, 10000);
   topAllContainers();
@@ -219,7 +257,9 @@ function initTops() {
 
 function main() {
   initTops();
-  initLogStreaming();
+  refreshContainers();
 }
 
-main();
+//main();
+
+refreshContainers();
