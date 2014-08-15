@@ -138,7 +138,6 @@ function handleStreamError(stream, error) {
 }
 
 function startLogstashStream(infos, s) {
-  console.log('start');
   var parts = url.parse('http://' + argv.logstash);
   var logstashConn = net.connect(parts.port, parts.hostname);
   var tags = _.clone(infos);
@@ -234,10 +233,6 @@ function refreshContainers(fn) {
       var newContainers = _.difference(tmpContainers, upContainers);
       var oldContainers = _.difference(upContainers, tmpContainers);
       upContainers = _.union(upContainers, newContainers);
-      console.log('Updated containers');
-      console.log(upContainers);
-      console.log('OLD');
-      console.log(oldContainers);
 
       // Starts log forward on new conainters
       async.each(newContainers, function(container, fn) {
