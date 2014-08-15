@@ -237,7 +237,7 @@ function refreshContainers(fn) {
       // Starts log forward on new conainters
       async.each(newContainers, function(container, fn) {
         var parts = container.split('-');
-        var host = parts[0], containerId = parts = [1];
+        var host = parts[0], containerId = parts[1];
 
         startLogstashStream(Containers[container], getLogStream(host, containerId));
 
