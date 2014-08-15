@@ -14,6 +14,7 @@ var LogstashTransform = require('../lib/logstash_transform');
 var upContainers = [];
 var Containers = {};
 var Streams = {};
+var refreshTimeout;
 
 http.globalAgent.maxSockets = Infinity;
 
@@ -125,11 +126,15 @@ function getLogStreams(fn) {
 function handleStreamEnd(stream) {
   console.log('Stream ends');
   console.log(arguments);
+  clearTimeout(refreshTimeout);
+  refreshContainers();
 }
 
 function handleStreamError(stream, error) {
   console.log('Stream errors');
   console.log(arguments);
+  clearTimeout(refreshTimeout);
+  refreshContainers();
 }
 
 function startLogstashStream(infos, s) {
@@ -243,7 +248,7 @@ function refreshContainers(fn) {
 
         fn();
       }, function(err) {
-        setTimeout(function(){ refreshContainers(); }, 3000);
+        refreshTimeout = setTimeout(function(){ refreshContainers(); }, 3000);
         fn();
       });
     });
