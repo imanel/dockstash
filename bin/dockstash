@@ -260,6 +260,4 @@ function main() {
   refreshContainers();
 }
 
-//main();
-
-refreshContainers();
+main();
