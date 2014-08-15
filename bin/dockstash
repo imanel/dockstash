@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 'use strict';
 
 var net               = require('net');
@@ -13,11 +14,13 @@ var LogstashTransform = require('../lib/logstash_transform');
 
 http.globalAgent.maxSockets = Infinity;
 
+var STREAMS = {};
+
 function help() {
   console.log('Streams Docker logs to Logstash. Tails Docker logs from remote Docker hosts.');
   console.log('  Usage: ' + argv.$0 + ' --logstash <host:port>');
   process.exit();
-};
+}
 
 var argv = require('yargs')
   .default('logstash', 'localhost')
@@ -88,7 +91,7 @@ function getLogStream(host, containerId) {
   return request({url: url, json: true});
 }
 
-function prepareStreamHash(host, container, stream) {
+function prepareStreamHash(host, container, logReadStream) {
   var nameTag = container.Image.split('/')[1];
   var parts = nameTag.split(':');
   return {
@@ -100,17 +103,18 @@ function prepareStreamHash(host, container, stream) {
     status: container.Status,
     containerId: container.Id,
     created: container.Created,
-    stream: stream,
+    logReadStream: logReadStream,
+    logstashWriteStream: null,
   };
 }
 
 function getLogStreams(fn) {
-  var streams = [];
+  var streams = {};
   getAllContainers(function(err, results) {
     async.each(Object.keys(results), function(host, fn) {
       async.each(results[host], function(container, fn) {
-        var stream = getLogStream(host, container.Id);
-        streams.push(prepareStreamHash(host, container, stream));
+        var logReadStream = getLogStream(host, container.Id);
+        streams[container.Id] = prepareStreamHash(host, container, logReadStream);
         fn();
       }, fn);
     }, function(err, results) {
@@ -120,30 +124,36 @@ function getLogStreams(fn) {
 }
 
 function handleStreamEnd(stream) {
-  console.log(arguments);
+  console.log('Stopping stream for ' + stream.host + '/' + stream.containerId.substr(0, 12));
+  stream.logstashWriteStream.end(function() {
+    delete STREAMS[stream.containerId];
+  });
 }
 
 function handleStreamError(stream, error) {
-  console.log(arguments);
+  console.error('Log connection error. Aborting.');
 }
 
 function startLogstashStream(stream) {
   var parts = url.parse('http://' + argv.logstash);
-  var logstashConn = net.connect(parts.port, parts.hostname);
+  stream.logstashWriteStream = net.connect(parts.port, parts.hostname);
   var tags = _.clone(stream);
-  delete tags.stream;
-  var s = stream.stream;
-  s.pipe(new LogstashTransform(tags)).pipe(logstashConn);
-  s.on('end', _.partial(handleStreamEnd, s));
-  s.on('error', _.partial(handleStreamError, s));
-  logstashConn.on('error', function() {
-    console.log(arguments)
+  delete tags.logReadStream;
+  delete tags.logstashWriteStream;
+  var s = stream.logReadStream;
+  s.pipe(new LogstashTransform(tags)).pipe(stream.logstashWriteStream);
+  s.on('end', _.partial(handleStreamEnd, stream));
+  s.on('error', _.partial(handleStreamError, stream));
+  stream.logstashWriteStream.on('error', function() {
+    console.error('Logstash connection error. Aborting.');
+    process.exit();
   });
 }
 
 function initLogStreaming() {
   getLogStreams(function(err, streams) {
-    _.each(streams, startLogstashStream);
+    STREAMS = streams;
+    _.each(STREAMS, startLogstashStream);
   });
 }
 
@@ -178,13 +188,13 @@ function sendTopToLogstash(host, container, top, fn) {
   var conn = net.connect(_parts.port, _parts.hostname, function() {
     _.map(top.Processes, function(item) {
       var status = _.object(top.Titles, item);
-      var status = prepareTopHash(host, container, item, top.Titles);
+      status = prepareTopHash(host, container, item, top.Titles);
       conn.write(JSON.stringify(status) + '\n', 'utf-8');
     });
     conn.end();
   });
   conn.on('finish', fn);
-};
+}
 
 function getAllContainers(fn) {
   var results = {};
@@ -203,7 +213,7 @@ function getAllContainers(fn) {
 function topAllContainers() {
   getAllContainers(function(err, results) {
     _.map(results, function(containers, host) {
-      containers.forEach(function(container) {
+      _.each(containers, function(container) {
         topContainer(host, container.Id, function(err, top) {
           sendTopToLogstash(host, container, top, _.noop);
         });
@@ -212,14 +222,36 @@ function topAllContainers() {
   });
 }
 
+function discoverContainers() {
+  getAllContainers(function(err, containers) {
+    var currentIds = _.keys(STREAMS);
+    _.each(_.keys(containers), function(host) {
+      var containerIds = _.pluck(containers[host], 'Id');
+      var newContainerIds = _.difference(containerIds, currentIds);
+      _.each(newContainerIds, function(containerId) {
+        var container = _.findWhere(containers[host], {Id: containerId});
+        var logStream = getLogStream(host, containerId);
+        STREAMS[containerId] = prepareStreamHash(host, container, logStream);
+        startLogstashStream(STREAMS[containerId]);
+        console.log('Found new container for ' + host + '/' + containerId.substr(0, 12));
+      });
+    });
+  });
+}
+
 function initTops() {
-  setInterval(topAllContainers, 10000);
+  setInterval(topAllContainers, 30000);
   topAllContainers();
+}
+
+function initDiscoverContainers() {
+  setInterval(discoverContainers, 2000);
 }
 
 function main() {
   initTops();
   initLogStreaming();
+  initDiscoverContainers();
 }
 
 main();
