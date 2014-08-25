@@ -18,7 +18,7 @@ var STREAMS = {};
 
 function help() {
   console.log('Streams Docker logs to Logstash. Tails Docker logs from remote Docker hosts.');
-  console.log('  Usage: ' + argv.$0 + ' --logstash <host:port>');
+  console.log('  Usage: ' + argv.$0 + ' --hosts <docker-hosts-comma-sep> --logstash <host:port>');
   process.exit();
 }
 
@@ -26,7 +26,7 @@ var argv = require('yargs')
   .default('logstash', 'localhost')
   .argv;
 
-if (argv.help || argv.h) {
+if (argv.help || argv.h || !argv.hosts || !argv.logstash) {
   help();
 }
 
@@ -146,7 +146,7 @@ function startLogstashStream(stream) {
   s.on('error', _.partial(handleStreamError, stream));
   stream.logstashWriteStream.on('error', function() {
     console.error('Logstash connection error. Aborting.');
-    process.exit();
+    process.exit(1);
   });
 }
 
