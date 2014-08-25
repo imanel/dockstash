@@ -12,6 +12,7 @@
   "keywords": [
     "docker",
     "logstash",
+    "kibana",
     "logging",
     "logs"
   ],
